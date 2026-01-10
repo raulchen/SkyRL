@@ -1,0 +1,58 @@
+#!/bin/bash
+# TX Server runner script for testing flash attention
+
+# Configuration
+HOST="0.0.0.0"
+PORT="8001"
+BASE_MODEL="Qwen/Qwen3-4B-Instruct-2507"
+DB_PATH="/tmp/tinker.db"
+
+# Backend config options
+TP_SIZE=8
+MAX_LORA_ADAPTERS=4
+TRAIN_MICRO_BATCH=4
+SAMPLE_MAX_SEQUENCES=32
+SHARD_ATTENTION_HEADS=false  # Must be false for cuDNN flash attention
+
+# Debug options (set to true to enable)
+ENFORCE_EAGER=${ENFORCE_EAGER:-true}
+GRADIENT_CHECKPOINTING=${GRADIENT_CHECKPOINTING:-true}
+
+# Build backend config JSON
+BACKEND_CONFIG=$(cat <<EOF
+{
+  "tensor_parallel_size": ${TP_SIZE},
+  "max_lora_adapters": ${MAX_LORA_ADAPTERS},
+  "train_micro_batch_size": ${TRAIN_MICRO_BATCH},
+  "sample_max_num_sequences": ${SAMPLE_MAX_SEQUENCES},
+  "shard_attention_heads": ${SHARD_ATTENTION_HEADS},
+  "enforce_eager": ${ENFORCE_EAGER},
+  "gradient_checkpointing": ${GRADIENT_CHECKPOINTING}
+}
+EOF
+)
+
+# Clean up old database
+rm -f "$DB_PATH"
+
+# Backup existing log
+[ -f ./tx.log ] && mv ./tx.log ./tx.log.bak
+
+echo "Starting TX server..."
+echo "  Host: $HOST:$PORT"
+echo "  Model: $BASE_MODEL"
+echo "  TP Size: $TP_SIZE"
+echo "  Shard Attention Heads: $SHARD_ATTENTION_HEADS"
+echo "  Enforce Eager (no JIT): $ENFORCE_EAGER"
+echo ""
+
+# Run server
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+# XLA_FLAGS="--xla_gpu_autotune_level=0" \
+# TF_GPU_ALLOCATOR=cuda_malloc_async \
+uv run --extra tinker --extra gpu -m tx.tinker.api \
+  --host "$HOST" \
+  --port "$PORT" \
+  --base-model "$BASE_MODEL" \
+  --database-url "sqlite:///$DB_PATH" \
+  --backend-config "$BACKEND_CONFIG" 2>&1 | tee ./tx.log
