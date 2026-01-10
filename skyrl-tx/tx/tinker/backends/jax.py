@@ -82,6 +82,10 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
         default=False,
         description="Whether to use gradient checkpointing (full recomputation strategy)",
     )
+    loss_chunk_size: int = Field(
+        default=1024,
+        description="Chunk size for cross-entropy loss computation. Reduces memory for large vocab models. 0 means disabled.",
+    )
     # Multi-node configuration
     coordinator_address: str | None = Field(
         default=None,
@@ -240,6 +244,9 @@ class JaxBackendImpl(AbstractBackend):
             # policy=None corresponds to full activation recomputation
             _model_forward = jax.checkpoint(_model_forward, policy=None)
 
+        # Chunk size for cross-entropy computation (0 = disabled)
+        loss_chunk_size = self.config.loss_chunk_size
+
         def loss_for_lora(
             lora_params: nnx.State,
             non_lora_params: nnx.State,
@@ -256,9 +263,44 @@ class JaxBackendImpl(AbstractBackend):
                 self.graphdef, lora_params, non_lora_params, input_ids, attention_mask, adapter_indices
             )  # [B, T, V]
 
-            log_sum_exp = jax.nn.logsumexp(logits, axis=-1, keepdims=True)
-            target_logits = jnp.take_along_axis(logits, target_ids[..., None], axis=-1)
-            target_logprobs = (target_logits - log_sum_exp).squeeze(-1)
+            B, T, V = logits.shape
+
+            if loss_chunk_size > 0:
+                # Chunked cross-entropy: process tokens in chunks to reduce memory
+                # Flatten batch and sequence dimensions
+                flat_logits = logits.reshape(-1, V)        # [B*T, V]
+                flat_target_ids = target_ids.reshape(-1)   # [B*T]
+                total_tokens = B * T
+
+                # Pad to multiple of chunk_size for clean slicing
+                num_chunks = (total_tokens + loss_chunk_size - 1) // loss_chunk_size
+                padded_size = num_chunks * loss_chunk_size
+                pad_amount = padded_size - total_tokens
+
+                if pad_amount > 0:
+                    flat_logits = jnp.pad(flat_logits, ((0, pad_amount), (0, 0)))
+                    flat_target_ids = jnp.pad(flat_target_ids, (0, pad_amount))
+
+                # Reshape into chunks: [num_chunks, chunk_size, V] and [num_chunks, chunk_size]
+                chunked_logits = flat_logits.reshape(num_chunks, loss_chunk_size, V)
+                chunked_targets = flat_target_ids.reshape(num_chunks, loss_chunk_size)
+
+                def compute_chunk_logprobs(args):
+                    """Compute log probabilities for a chunk of tokens."""
+                    chunk_logits, chunk_targets = args
+                    log_sum_exp = jax.nn.logsumexp(chunk_logits, axis=-1, keepdims=True)
+                    target_logits = jnp.take_along_axis(chunk_logits, chunk_targets[..., None], axis=-1)
+                    return (target_logits - log_sum_exp).squeeze(-1)
+
+                # Process chunks sequentially using lax.map (not vmap) to reduce memory
+                all_logprobs = jax.lax.map(compute_chunk_logprobs, (chunked_logits, chunked_targets))
+                # Flatten and slice to original size, then reshape to [B, T]
+                target_logprobs = all_logprobs.reshape(-1)[:total_tokens].reshape(B, T)
+            else:
+                # Original non-chunked computation
+                log_sum_exp = jax.nn.logsumexp(logits, axis=-1, keepdims=True)
+                target_logits = jnp.take_along_axis(logits, target_ids[..., None], axis=-1)
+                target_logprobs = (target_logits - log_sum_exp).squeeze(-1)
 
             def compute_loss_per_example(loss_fn_type, target_logprobs, loss_mask, sampling_logprobs, advantages):
                 return jax.lax.switch(
