@@ -79,7 +79,7 @@ class Qwen3Attention(nnx.Module):
         self,
         x: jax.Array,
         *,
-        attention_mask: jax.Array,
+        seq_lengths: jax.Array,
         positions: jax.Array,
         adapter_indices: jax.Array | None = None,
         kv_cache: tuple[jax.Array, jax.Array, int] | None = None,
@@ -103,14 +103,24 @@ class Qwen3Attention(nnx.Module):
 
         updated_cache = (k, v)
 
-        # Attention (causal only during prefill, GQA handled natively by dot_product_attention)
+        # cuDNN flash attention with seq_lengths (O(seq) memory, supports gradients)
+        # During prefill: query_len == kv_len == seq_lengths
+        # During decode: query_len == 1, kv_len == seq_lengths (cache position)
+        is_prefill = kv_cache is None
+        if is_prefill:
+            query_seq_lengths = seq_lengths
+        else:
+            query_seq_lengths = jnp.ones_like(seq_lengths)
+
         attn_output = jax.nn.dot_product_attention(
             q,
             k,
             v,
             scale=1.0 / self.head_dim**0.5,
-            mask=attention_mask[:, None, None, :].astype(bool),
-            is_causal=kv_cache is None,
+            is_causal=is_prefill,
+            query_seq_lengths=query_seq_lengths,
+            key_value_seq_lengths=seq_lengths,
+            implementation='cudnn',
         )
 
         output = attn_output.reshape(B, T, self.num_heads * self.head_dim)
@@ -278,7 +288,7 @@ class Qwen3DecoderLayer(nnx.Module):
         self,
         hidden_states: jax.Array,
         *,
-        attention_mask: jax.Array,
+        seq_lengths: jax.Array,
         positions: jax.Array,
         adapter_indices: jax.Array | None = None,
         kv_cache: tuple[jax.Array, jax.Array, int] | None = None,
@@ -287,7 +297,7 @@ class Qwen3DecoderLayer(nnx.Module):
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states, updated_cache = self.self_attn(
             hidden_states,
-            attention_mask=attention_mask,
+            seq_lengths=seq_lengths,
             positions=positions,
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
@@ -326,7 +336,7 @@ class Qwen3Model(nnx.Module):
         self,
         input_ids: jax.Array,
         *,
-        attention_mask: jax.Array,
+        seq_lengths: jax.Array,
         positions: jax.Array,
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
@@ -346,7 +356,7 @@ class Qwen3Model(nnx.Module):
 
             hidden_states, (k, v) = layer(
                 hidden_states,
-                attention_mask=attention_mask,
+                seq_lengths=seq_lengths,
                 positions=positions,
                 adapter_indices=adapter_indices,
                 kv_cache=kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx], kv_cache.cache_position),
@@ -397,16 +407,19 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
         *,
         attention_mask: jax.Array,
         positions: jax.Array | None = None,
+        seq_lengths: jax.Array | None = None,
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
     ) -> CausalLMOutput:
         if positions is None:
             positions = compute_positions(attention_mask)
+        if seq_lengths is None:
+            seq_lengths = attention_mask.sum(axis=1).astype(jnp.int32)
 
         outputs = self.model(
             input_ids,
-            attention_mask=attention_mask,
+            seq_lengths=seq_lengths,
             positions=positions,
             output_hidden_states=output_hidden_states,
             adapter_indices=adapter_indices,

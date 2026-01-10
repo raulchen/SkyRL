@@ -75,8 +75,8 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
     )
     enforce_eager: bool = Field(default=False, description="Disable JAX JIT compilation")
     shard_attention_heads: bool = Field(
-        default=True,
-        description="Whether to shard attention linear layers (qkvo projections) across tensor parallel devices",
+        default=False,
+        description="Whether to shard attention linear layers (qkvo projections) across tensor parallel devices. Must be False for cuDNN flash attention.",
     )
     gradient_checkpointing: bool = Field(
         default=False,
