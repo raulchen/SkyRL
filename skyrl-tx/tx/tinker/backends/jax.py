@@ -239,10 +239,35 @@ class JaxBackendImpl(AbstractBackend):
             output = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)
             return output.logits
 
+        def _model_forward_hidden(
+            graphdef: nnx.GraphDef,
+            lora_params: nnx.State,
+            non_lora_params: nnx.State,
+            input_ids: jax.Array,
+            attention_mask: jax.Array,
+            adapter_indices: jax.Array,
+        ) -> tuple[jax.Array, jax.Array]:
+            """Forward pass returning hidden states and lm_head weight for fused cross-entropy."""
+            model = nnx.merge(graphdef, lora_params, non_lora_params)
+            output = model(input_ids, attention_mask=attention_mask, adapter_indices=adapter_indices)
+            hidden_states = output.last_hidden_state  # [B, T, H]
+
+            # Get lm_head weight - handle tied embeddings
+            if model.config.tie_word_embeddings:
+                # For tied embeddings: embedding is [V, H], we need [H, V] for matmul
+                lm_head_weight = model.model.embed_tokens.embedding.value.T  # [H, V]
+            else:
+                # For non-tied: lm_head is a LoRALinear (extends nnx.Linear) with kernel [H, V]
+                # nnx.Linear stores weight as 'kernel' with shape [in_features, out_features]
+                lm_head_weight = model.lm_head.kernel.value  # [H, V]
+
+            return hidden_states, lm_head_weight
+
         if self.config.gradient_checkpointing:
             # Wrap the model forward call to use jax.checkpoint for gradient checkpointing
             # policy=None corresponds to full activation recomputation
             _model_forward = jax.checkpoint(_model_forward, policy=None)
+            _model_forward_hidden = jax.checkpoint(_model_forward_hidden, policy=None)
 
         # Chunk size for cross-entropy computation (0 = disabled)
         loss_chunk_size = self.config.loss_chunk_size
@@ -259,17 +284,19 @@ class JaxBackendImpl(AbstractBackend):
             sampling_logprobs: jax.Array,
             advantages: jax.Array,
         ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
-            logits = _model_forward(
-                self.graphdef, lora_params, non_lora_params, input_ids, attention_mask, adapter_indices
-            )  # [B, T, V]
-
-            B, T, V = logits.shape
-
             if loss_chunk_size > 0:
-                # Chunked cross-entropy: process tokens in chunks to reduce memory
+                # Fused chunked cross-entropy: compute lm_head inside the chunk loop
+                # This avoids materializing the full [B*T, V] logits tensor
+                hidden_states, lm_head_weight = _model_forward_hidden(
+                    self.graphdef, lora_params, non_lora_params, input_ids, attention_mask, adapter_indices
+                )  # hidden_states: [B, T, H], lm_head_weight: [H, V]
+
+                B, T, H = hidden_states.shape
+                V = lm_head_weight.shape[1]
+
                 # Flatten batch and sequence dimensions
-                flat_logits = logits.reshape(-1, V)        # [B*T, V]
-                flat_target_ids = target_ids.reshape(-1)   # [B*T]
+                flat_hidden = hidden_states.reshape(-1, H)  # [B*T, H]
+                flat_target_ids = target_ids.reshape(-1)    # [B*T]
                 total_tokens = B * T
 
                 # Pad to multiple of chunk_size for clean slicing
@@ -278,26 +305,32 @@ class JaxBackendImpl(AbstractBackend):
                 pad_amount = padded_size - total_tokens
 
                 if pad_amount > 0:
-                    flat_logits = jnp.pad(flat_logits, ((0, pad_amount), (0, 0)))
+                    flat_hidden = jnp.pad(flat_hidden, ((0, pad_amount), (0, 0)))
                     flat_target_ids = jnp.pad(flat_target_ids, (0, pad_amount))
 
-                # Reshape into chunks: [num_chunks, chunk_size, V] and [num_chunks, chunk_size]
-                chunked_logits = flat_logits.reshape(num_chunks, loss_chunk_size, V)
+                # Reshape into chunks: [num_chunks, chunk_size, H] and [num_chunks, chunk_size]
+                chunked_hidden = flat_hidden.reshape(num_chunks, loss_chunk_size, H)
                 chunked_targets = flat_target_ids.reshape(num_chunks, loss_chunk_size)
 
                 def compute_chunk_logprobs(args):
-                    """Compute log probabilities for a chunk of tokens."""
-                    chunk_logits, chunk_targets = args
+                    """Compute lm_head and log probabilities for a chunk of tokens."""
+                    chunk_hidden, chunk_targets = args
+                    # Compute logits for this chunk only: [chunk_size, H] @ [H, V] = [chunk_size, V]
+                    chunk_logits = chunk_hidden @ lm_head_weight
+                    # Compute log probabilities
                     log_sum_exp = jax.nn.logsumexp(chunk_logits, axis=-1, keepdims=True)
                     target_logits = jnp.take_along_axis(chunk_logits, chunk_targets[..., None], axis=-1)
                     return (target_logits - log_sum_exp).squeeze(-1)
 
                 # Process chunks sequentially using lax.map (not vmap) to reduce memory
-                all_logprobs = jax.lax.map(compute_chunk_logprobs, (chunked_logits, chunked_targets))
+                all_logprobs = jax.lax.map(compute_chunk_logprobs, (chunked_hidden, chunked_targets))
                 # Flatten and slice to original size, then reshape to [B, T]
                 target_logprobs = all_logprobs.reshape(-1)[:total_tokens].reshape(B, T)
             else:
                 # Original non-chunked computation
+                logits = _model_forward(
+                    self.graphdef, lora_params, non_lora_params, input_ids, attention_mask, adapter_indices
+                )  # [B, T, V]
                 log_sum_exp = jax.nn.logsumexp(logits, axis=-1, keepdims=True)
                 target_logits = jnp.take_along_axis(logits, target_ids[..., None], axis=-1)
                 target_logprobs = (target_logits - log_sum_exp).squeeze(-1)

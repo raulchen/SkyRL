@@ -64,16 +64,37 @@ def test_forward_backward(training_client, tokenizer, batch_size: int = 4, seq_l
     return True
 
 
+def test_optim_step(training_client, learning_rate: float = 1e-4):
+    """Test optimizer step (apply accumulated gradients)."""
+    print(f"\n=== Testing Optim Step (lr={learning_rate}) ===")
+
+    adam_params = types.AdamParams(
+        learning_rate=learning_rate,
+        betas=(0.9, 0.999),
+        eps=1e-8,
+        weight_decay=0.01,
+    )
+
+    optim_future = training_client.optim_step(adam_params)
+    result = optim_future.result()
+
+    print(f"Optim step completed")
+    print(f"Result: {result}")
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description="Test TX server with flash attention")
     parser.add_argument("--url", default="http://localhost:8001", help="Server URL")
     parser.add_argument("--base-model", default=BASE_MODEL, help="Base model name")
     parser.add_argument("--sample-n", type=int, default=4, help="Number of samples")
     parser.add_argument("--sample-tokens", type=int, default=8192, help="Max tokens to generate")
-    parser.add_argument("--train-batch", type=int, default=32, help="Training batch size")
+    parser.add_argument("--train-batch", type=int, default=2, help="Training batch size")
     parser.add_argument("--train-seq", type=int, default=8192, help="Training sequence length")
     parser.add_argument("--skip-sample", action="store_true", help="Skip sampling test")
     parser.add_argument("--skip-train", action="store_true", help="Skip training test")
+    parser.add_argument("--skip-optim", action="store_true", help="Skip optimizer step test")
+    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate for optim step")
     args = parser.parse_args()
 
     print(f"Testing server at {args.url}")
@@ -105,18 +126,31 @@ def main():
             print(f"Sampling test FAILED: {e}")
             success = False
 
-    if not args.skip_train:
+    if not args.skip_train or not args.skip_optim:
         # Create training client with LoRA
         training_client = service_client.create_lora_training_client(base_model=args.base_model)
-        try:
-            if not test_forward_backward(training_client, tokenizer, args.train_batch, args.train_seq):
-                print("Forward-backward test FAILED")
+
+        if not args.skip_train:
+            try:
+                if not test_forward_backward(training_client, tokenizer, args.train_batch, args.train_seq):
+                    print("Forward-backward test FAILED")
+                    success = False
+                else:
+                    print("Forward-backward test PASSED")
+            except Exception as e:
+                print(f"Forward-backward test FAILED: {e}")
                 success = False
-            else:
-                print("Forward-backward test PASSED")
-        except Exception as e:
-            print(f"Forward-backward test FAILED: {e}")
-            success = False
+
+        if not args.skip_optim:
+            try:
+                if not test_optim_step(training_client, args.lr):
+                    print("Optim step test FAILED")
+                    success = False
+                else:
+                    print("Optim step test PASSED")
+            except Exception as e:
+                print(f"Optim step test FAILED: {e}")
+                success = False
 
     return 0 if success else 1
 

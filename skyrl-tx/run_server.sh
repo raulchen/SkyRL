@@ -15,8 +15,9 @@ SAMPLE_MAX_SEQUENCES=32
 SHARD_ATTENTION_HEADS=false  # Must be false for cuDNN flash attention
 
 # Debug options (set to true to enable)
-ENFORCE_EAGER=${ENFORCE_EAGER:-true}
+ENFORCE_EAGER=${ENFORCE_EAGER:-false}
 GRADIENT_CHECKPOINTING=${GRADIENT_CHECKPOINTING:-true}
+DUMP_XLA=${DUMP_XLA:-false}  # Dump XLA graphs to /tmp/xla_dump
 
 # Memory optimization
 LOSS_CHUNK_SIZE=${LOSS_CHUNK_SIZE:-1024}  # Chunk size for cross-entropy loss (0 = disabled)
@@ -49,12 +50,23 @@ echo "  TP Size: $TP_SIZE"
 echo "  Shard Attention Heads: $SHARD_ATTENTION_HEADS"
 echo "  Enforce Eager (no JIT): $ENFORCE_EAGER"
 echo "  Loss Chunk Size: $LOSS_CHUNK_SIZE"
+echo "  Dump XLA: $DUMP_XLA"
 echo ""
+
+# Set up XLA flags for dumping if enabled
+XLA_FLAGS_VAR=""
+if [ "$DUMP_XLA" = "true" ]; then
+    echo "Cleaning up old XLA dump..."
+    rm -rf /tmp/xla_dump
+    mkdir -p /tmp/xla_dump
+    XLA_FLAGS_VAR="--xla_dump_to=/tmp/xla_dump --xla_dump_hlo_as_text"
+    echo "XLA graphs will be dumped to /tmp/xla_dump"
+fi
 
 # Run server
 # XLA_PYTHON_CLIENT_PREALLOCATE=false \
-# XLA_FLAGS="--xla_gpu_autotune_level=0" \
 TF_GPU_ALLOCATOR=cuda_malloc_async \
+XLA_FLAGS="$XLA_FLAGS_VAR" \
 uv run --extra tinker --extra gpu -m tx.tinker.api \
   --host "$HOST" \
   --port "$PORT" \
