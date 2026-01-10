@@ -10,7 +10,7 @@ DB_PATH="/tmp/tinker.db"
 # Backend config options
 TP_SIZE=8
 MAX_LORA_ADAPTERS=2
-TRAIN_MICRO_BATCH=4
+TRAIN_MICRO_BATCH=2
 SAMPLE_MAX_SEQUENCES=32
 SHARD_ATTENTION_HEADS=false  # Must be false for cuDNN flash attention
 
@@ -64,7 +64,7 @@ if [ "$DUMP_XLA" = "true" ]; then
 fi
 
 # Run server
-# XLA_PYTHON_CLIENT_PREALLOCATE=false \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
 TF_GPU_ALLOCATOR=cuda_malloc_async \
 XLA_FLAGS="$XLA_FLAGS_VAR" \
 uv run --extra tinker --extra gpu -m tx.tinker.api \

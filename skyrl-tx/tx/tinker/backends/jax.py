@@ -166,6 +166,7 @@ class JaxBackendImpl(AbstractBackend):
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             shard_attention_heads=config.shard_attention_heads,
+            gradient_checkpointing=config.gradient_checkpointing,
         )
 
         model_class = get_model_class(self.model_config)
@@ -263,11 +264,10 @@ class JaxBackendImpl(AbstractBackend):
 
             return hidden_states, lm_head_weight
 
-        if self.config.gradient_checkpointing:
-            # Wrap the model forward call to use jax.checkpoint for gradient checkpointing
-            # policy=None corresponds to full activation recomputation
-            _model_forward = jax.checkpoint(_model_forward, policy=None)
-            _model_forward_hidden = jax.checkpoint(_model_forward_hidden, policy=None)
+        # Note: gradient checkpointing is now handled per-layer inside the model
+        # when self.model_config.gradient_checkpointing is True.
+        # This provides better memory efficiency than whole-model checkpointing
+        # because only one layer's activations need to be in memory at a time.
 
         # Chunk size for cross-entropy computation (0 = disabled)
         loss_chunk_size = self.config.loss_chunk_size

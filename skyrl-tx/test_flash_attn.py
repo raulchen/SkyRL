@@ -70,7 +70,8 @@ def test_optim_step(training_client, learning_rate: float = 1e-4):
 
     adam_params = types.AdamParams(
         learning_rate=learning_rate,
-        betas=(0.9, 0.999),
+        beta1=0.9,
+        beta2=0.95,
         eps=1e-8,
         weight_decay=0.01,
     )
@@ -89,7 +90,7 @@ def main():
     parser.add_argument("--base-model", default=BASE_MODEL, help="Base model name")
     parser.add_argument("--sample-n", type=int, default=4, help="Number of samples")
     parser.add_argument("--sample-tokens", type=int, default=8192, help="Max tokens to generate")
-    parser.add_argument("--train-batch", type=int, default=2, help="Training batch size")
+    parser.add_argument("--train-batch", type=int, default=4, help="Training batch size")
     parser.add_argument("--train-seq", type=int, default=8192, help="Training sequence length")
     parser.add_argument("--skip-sample", action="store_true", help="Skip sampling test")
     parser.add_argument("--skip-train", action="store_true", help="Skip training test")

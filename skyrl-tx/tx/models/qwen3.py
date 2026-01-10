@@ -350,19 +350,43 @@ class Qwen3Model(nnx.Module):
         all_hidden_states: list[jax.Array] = []
         updated_keys, updated_values = [], []
 
-        for layer_idx, layer in enumerate(self.layers):
-            if output_hidden_states:
-                all_hidden_states.append(hidden_states)
+        if self.config.gradient_checkpointing and not kv_cache:
+            # Per-layer gradient checkpointing: recompute each layer during backward
+            # This gives optimal memory (only 1 layer's activations at a time)
+            # Use default arg (_layer=layer) to capture layer by value
+            for layer_idx, layer in enumerate(self.layers):
+                if output_hidden_states:
+                    all_hidden_states.append(hidden_states)
 
-            hidden_states, (k, v) = layer(
-                hidden_states,
-                seq_lengths=seq_lengths,
-                positions=positions,
-                adapter_indices=adapter_indices,
-                kv_cache=kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx], kv_cache.cache_position),
-            )
-            updated_keys.append(k)
-            updated_values.append(v)
+                @jax.checkpoint
+                def checkpointed_layer(hs, sl, pos, ai, _layer=layer):
+                    return _layer(hs, seq_lengths=sl, positions=pos, adapter_indices=ai, kv_cache=None)
+
+                hidden_states, (k, v) = checkpointed_layer(
+                    hidden_states, seq_lengths, positions, adapter_indices
+                )
+                updated_keys.append(k)
+                updated_values.append(v)
+        else:
+            # Standard forward pass (inference or no checkpointing)
+            for layer_idx, layer in enumerate(self.layers):
+                if output_hidden_states:
+                    all_hidden_states.append(hidden_states)
+
+                layer_kv_cache = (
+                    (kv_cache.keys[layer_idx], kv_cache.values[layer_idx], kv_cache.cache_position)
+                    if kv_cache
+                    else None
+                )
+                hidden_states, (k, v) = layer(
+                    hidden_states,
+                    seq_lengths=seq_lengths,
+                    positions=positions,
+                    adapter_indices=adapter_indices,
+                    kv_cache=layer_kv_cache,
+                )
+                updated_keys.append(k)
+                updated_values.append(v)
 
         hidden_states = self.norm(hidden_states)
         if output_hidden_states:
