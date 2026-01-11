@@ -355,9 +355,10 @@ class Qwen3Model(nnx.Module):
         all_hidden_states: list[jax.Array] = []
         updated_keys, updated_values = [], []
 
-        if use_gradient_checkpointing and not kv_cache:
-            # fori_loop with stacked params: XLA compiles ONE body function
-            # This enables workspace sharing across layers (770 MiB instead of 27 GB)
+        if not kv_cache:
+            # Prefill path: use fori_loop with stacked params
+            # XLA compiles ONE body function, enabling cuDNN workspace sharing
+            # (770 MiB shared instead of 36 × 1.5 GiB = 54 GiB separate)
             num_layers = len(self.layers)
 
             # Stack layer states for fori_loop
@@ -402,12 +403,14 @@ class Qwen3Model(nnx.Module):
 
                 return (hs_new, ks, vs)
 
-            # Wrap with checkpoint for gradient recomputation
-            checkpointed_body = jax.checkpoint(layer_body)
+            # Always wrap with checkpoint to prevent XLA from unrolling the loop
+            # This is needed even for inference to share cuDNN workspace across layers
+            # The checkpoint behavior (recompute during backward) is a no-op for inference
+            loop_body = jax.checkpoint(layer_body)
 
             # Run fori_loop - XLA sees ONE body function repeated
             hidden_states, all_keys, all_values = jax.lax.fori_loop(
-                0, num_layers, checkpointed_body, (hidden_states, all_keys, all_values)
+                0, num_layers, loop_body, (hidden_states, all_keys, all_values)
             )
 
             # Convert stacked KV to list format for compatibility
@@ -419,15 +422,16 @@ class Qwen3Model(nnx.Module):
                 # For now, just append final hidden state
                 all_hidden_states.append(hidden_states)
         else:
-            # Standard forward pass (inference or no checkpointing)
+            # Decode path: standard loop
+            # Note: This creates 36 closures which XLA allocates workspaces for.
+            # For 8k+ sequences, this may OOM. See BATCH_SIZE_INVESTIGATION.md
+            # for supported max_tokens limits.
             for layer_idx, layer in enumerate(self.layers):
                 if output_hidden_states:
                     all_hidden_states.append(hidden_states)
 
                 layer_kv_cache = (
-                    (kv_cache.keys[layer_idx], kv_cache.values[layer_idx], kv_cache.cache_position)
-                    if kv_cache
-                    else None
+                    kv_cache.keys[layer_idx], kv_cache.values[layer_idx], kv_cache.cache_position
                 )
                 hidden_states, (k, v) = layer(
                     hidden_states,
