@@ -150,8 +150,8 @@ class GeneratorMixin:
         # Compute positions from attention mask
         positions = compute_positions(attention_mask)
 
-        # Prefill: process full prompt
-        outputs = model(input_ids, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices)
+        # Prefill: process full prompt (disable gradient checkpointing for inference)
+        outputs = model(input_ids, attention_mask=attention_mask, positions=positions, adapter_indices=adapter_indices, gradient_checkpointing=False)
 
         # Compute prompt logprobs if requested
         prompt_logprobs_array = compute_prompt_logprobs(outputs.logits, input_ids) if prompt_logprobs else None
@@ -196,6 +196,7 @@ class GeneratorMixin:
                 positions=s.last_positions + 1,
                 kv_cache=s.kv_cache,
                 adapter_indices=adapter_indices,
+                gradient_checkpointing=False,
             )
             next_state = DecodeState(
                 kv_cache=outputs.kv_cache,

@@ -341,16 +341,21 @@ class Qwen3Model(nnx.Module):
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
+        gradient_checkpointing: bool | None = None,
     ) -> ModelOutput:
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        # Allow overriding gradient_checkpointing (e.g., disable during inference)
+        use_gradient_checkpointing = (
+            gradient_checkpointing if gradient_checkpointing is not None else self.config.gradient_checkpointing
         )
 
         hidden_states = self.embed_tokens(input_ids, adapter_indices=adapter_indices)
         all_hidden_states: list[jax.Array] = []
         updated_keys, updated_values = [], []
 
-        if self.config.gradient_checkpointing and not kv_cache:
+        if use_gradient_checkpointing and not kv_cache:
             # fori_loop with stacked params: XLA compiles ONE body function
             # This enables workspace sharing across layers (770 MiB instead of 27 GB)
             num_layers = len(self.layers)
@@ -481,6 +486,7 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
+        gradient_checkpointing: bool | None = None,
     ) -> CausalLMOutput:
         if positions is None:
             positions = compute_positions(attention_mask)
@@ -494,6 +500,7 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
             output_hidden_states=output_hidden_states,
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
+            gradient_checkpointing=gradient_checkpointing,
         )
         hidden_states = outputs.last_hidden_state
         if self.config.tie_word_embeddings:
