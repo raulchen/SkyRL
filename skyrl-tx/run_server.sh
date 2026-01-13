@@ -20,6 +20,7 @@ DUMP_XLA=${DUMP_XLA:-false}  # Dump XLA graphs to /tmp/xla_dump
 
 # Memory optimization
 LOSS_CHUNK_SIZE=${LOSS_CHUNK_SIZE:-1024}  # Chunk size for cross-entropy loss
+GRADIENT_CHECKPOINTING=${GRADIENT_CHECKPOINTING:-false}  # Recompute activations during backward to save memory
 
 # Build backend config JSON
 BACKEND_CONFIG=$(cat <<EOF
@@ -30,7 +31,8 @@ BACKEND_CONFIG=$(cat <<EOF
   "sample_max_num_sequences": ${SAMPLE_MAX_SEQUENCES},
   "shard_attention_heads": ${SHARD_ATTENTION_HEADS},
   "enforce_eager": ${ENFORCE_EAGER},
-  "loss_chunk_size": ${LOSS_CHUNK_SIZE}
+  "loss_chunk_size": ${LOSS_CHUNK_SIZE},
+  "gradient_checkpointing": ${GRADIENT_CHECKPOINTING}
 }
 EOF
 )
@@ -48,6 +50,7 @@ echo "  TP Size: $TP_SIZE"
 echo "  Shard Attention Heads: $SHARD_ATTENTION_HEADS"
 echo "  Enforce Eager (no JIT): $ENFORCE_EAGER"
 echo "  Loss Chunk Size: $LOSS_CHUNK_SIZE"
+echo "  Gradient Checkpointing: $GRADIENT_CHECKPOINTING"
 echo "  Dump XLA: $DUMP_XLA"
 echo ""
 

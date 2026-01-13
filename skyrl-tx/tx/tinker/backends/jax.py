@@ -80,7 +80,7 @@ class JaxBackendConfig(BaseModel, extra="forbid"):
     )
     gradient_checkpointing: bool = Field(
         default=False,
-        description="Whether to use gradient checkpointing (full recomputation strategy)",
+        description="Per-layer activation checkpointing: recompute activations during backward to save memory",
     )
     loss_chunk_size: int = Field(
         default=1024,
@@ -166,6 +166,7 @@ class JaxBackendImpl(AbstractBackend):
             max_lora_adapters=config.max_lora_adapters,
             max_lora_rank=config.max_lora_rank,
             shard_attention_heads=config.shard_attention_heads,
+            gradient_checkpointing=config.gradient_checkpointing,
         )
 
         model_class = get_model_class(self.model_config)
@@ -241,14 +242,9 @@ class JaxBackendImpl(AbstractBackend):
                 input_ids,
                 attention_mask=attention_mask,
                 adapter_indices=adapter_indices,
-                compute_logits=False,
+                is_training=True,
             )
             return output.last_hidden_state, output.lm_head
-
-        if self.config.gradient_checkpointing:
-            # Wrap the model forward call to use jax.checkpoint for gradient checkpointing
-            # policy=None corresponds to full activation recomputation
-            _model_forward = jax.checkpoint(_model_forward, policy=None)
 
         loss_chunk_size = self.config.loss_chunk_size
         if loss_chunk_size <= 0:

@@ -250,6 +250,7 @@ class Llama3Model(nnx.Module):
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
+        is_training: bool = False,
     ) -> ModelOutput:
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -263,12 +264,16 @@ class Llama3Model(nnx.Module):
             if output_hidden_states:
                 all_hidden_states.append(hidden_states)
 
+            layer_kv_cache = kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx], kv_cache.cache_position)
+            if self.config.gradient_checkpointing and is_training:
+                layer = jax.checkpoint(layer)
+
             hidden_states, (k, v) = layer(
                 hidden_states,
                 seq_lengths=seq_lengths,
                 positions=positions,
                 adapter_indices=adapter_indices,
-                kv_cache=kv_cache and (kv_cache.keys[layer_idx], kv_cache.values[layer_idx], kv_cache.cache_position),
+                kv_cache=layer_kv_cache,
             )
             updated_keys.append(k)
             updated_values.append(v)
@@ -329,7 +334,7 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
-        compute_logits: bool = True,
+        is_training: bool = False,
     ) -> CausalLMOutput:
         if positions is None:
             positions = compute_positions(attention_mask)
@@ -343,23 +348,26 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
             output_hidden_states=output_hidden_states,
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
+            is_training=is_training,
         )
 
-        if compute_logits:
+        if is_training:
+            # Training: skip logits, return lm_head for chunked computation
+            logits = None
+        else:
+            # Inference: compute logits normally
             hidden_states = outputs.last_hidden_state
             if self.config.tie_word_embeddings:
                 logits = hidden_states @ self.model.embed_tokens.embedding.value.T
             else:
                 logits = self.lm_head(hidden_states, adapter_indices=adapter_indices)
-        else:
-            logits = None
 
         return CausalLMOutput(
             logits=logits,
             last_hidden_state=outputs.last_hidden_state,
             kv_cache=outputs.kv_cache,
             hidden_states=outputs.hidden_states,
-            lm_head=self.lm_head_weight,
+            lm_head=self.lm_head_weight if is_training else None,
         )
 
 
