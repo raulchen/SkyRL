@@ -311,6 +311,14 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
         """Return True if a parameter path corresponds to LoRA weights."""
         return any(name in path for name in ("lora_A", "lora_B"))
 
+    @property
+    def lm_head_weight(self) -> jax.Array:
+        """Returns lm_head weight [H, V] for external matmul (e.g., chunked cross-entropy)."""
+        if self.config.tie_word_embeddings:
+            return self.model.embed_tokens.embedding.value.T
+        else:
+            return self.lm_head.kernel.value
+
     def __call__(
         self,
         input_ids: jax.Array,
@@ -321,6 +329,7 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
         output_hidden_states: bool | None = None,
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
+        compute_logits: bool = True,
     ) -> CausalLMOutput:
         if positions is None:
             positions = compute_positions(attention_mask)
@@ -335,17 +344,22 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
             adapter_indices=adapter_indices,
             kv_cache=kv_cache,
         )
-        hidden_states = outputs.last_hidden_state
-        if self.config.tie_word_embeddings:
-            logits = hidden_states @ self.model.embed_tokens.embedding.value.T
+
+        if compute_logits:
+            hidden_states = outputs.last_hidden_state
+            if self.config.tie_word_embeddings:
+                logits = hidden_states @ self.model.embed_tokens.embedding.value.T
+            else:
+                logits = self.lm_head(hidden_states, adapter_indices=adapter_indices)
         else:
-            logits = self.lm_head(hidden_states, adapter_indices=adapter_indices)
+            logits = None
 
         return CausalLMOutput(
             logits=logits,
             last_hidden_state=outputs.last_hidden_state,
             kv_cache=outputs.kv_cache,
             hidden_states=outputs.hidden_states,
+            lm_head=self.lm_head_weight,
         )
 
 

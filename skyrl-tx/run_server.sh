@@ -18,6 +18,9 @@ SHARD_ATTENTION_HEADS=${SHARD_ATTENTION_HEADS:-true}
 ENFORCE_EAGER=${ENFORCE_EAGER:-false}
 DUMP_XLA=${DUMP_XLA:-false}  # Dump XLA graphs to /tmp/xla_dump
 
+# Memory optimization
+LOSS_CHUNK_SIZE=${LOSS_CHUNK_SIZE:-1024}  # Chunk size for cross-entropy loss
+
 # Build backend config JSON
 BACKEND_CONFIG=$(cat <<EOF
 {
@@ -26,7 +29,8 @@ BACKEND_CONFIG=$(cat <<EOF
   "train_micro_batch_size": ${TRAIN_MICRO_BATCH},
   "sample_max_num_sequences": ${SAMPLE_MAX_SEQUENCES},
   "shard_attention_heads": ${SHARD_ATTENTION_HEADS},
-  "enforce_eager": ${ENFORCE_EAGER}
+  "enforce_eager": ${ENFORCE_EAGER},
+  "loss_chunk_size": ${LOSS_CHUNK_SIZE}
 }
 EOF
 )
@@ -43,6 +47,7 @@ echo "  Model: $BASE_MODEL"
 echo "  TP Size: $TP_SIZE"
 echo "  Shard Attention Heads: $SHARD_ATTENTION_HEADS"
 echo "  Enforce Eager (no JIT): $ENFORCE_EAGER"
+echo "  Loss Chunk Size: $LOSS_CHUNK_SIZE"
 echo "  Dump XLA: $DUMP_XLA"
 echo ""
 
