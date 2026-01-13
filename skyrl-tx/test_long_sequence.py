@@ -2,6 +2,7 @@
 """Test client for TX server long sequence support using tinker API."""
 
 import argparse
+import time
 
 import tinker
 from tinker import types
@@ -41,6 +42,7 @@ def test_sample(sampling_client, tokenizer, num_samples: int = 4, max_tokens: in
     repeated = (base_tokens * ((prompt_len // len(base_tokens)) + 1))[:prompt_len]
     prompt = types.ModelInput.from_ints(repeated)
 
+    start_time = time.time()
     request = sampling_client.sample(
         prompt=prompt,
         sampling_params=types.SamplingParams(temperature=0.7, max_tokens=gen_tokens, seed=42),
@@ -48,7 +50,9 @@ def test_sample(sampling_client, tokenizer, num_samples: int = 4, max_tokens: in
     )
 
     result = request.result()
-    print(f"Sampling completed")
+    elapsed = time.time() - start_time
+
+    print(f"Sampling completed in {elapsed:.2f}s (client e2e)")
     print(f"Generated {len(result.sequences)} sequences")
     for i, seq in enumerate(result.sequences):
         print(f"  Sequence {i}: {len(seq.tokens)} tokens, stop_reason={seq.stop_reason}")
@@ -62,10 +66,12 @@ def test_forward_backward(training_client, tokenizer, batch_size: int = 4, seq_l
     # Create training examples with specified sequence length
     data = [make_datum(tokenizer, seq_len=seq_len) for _ in range(batch_size)]
 
+    start_time = time.time()
     fwdbwd_future = training_client.forward_backward(data, "cross_entropy")
     result = fwdbwd_future.result()
+    elapsed = time.time() - start_time
 
-    print(f"Forward-backward completed")
+    print(f"Forward-backward completed in {elapsed:.2f}s (client e2e)")
     print(f"Loss outputs: {len(result.loss_fn_outputs)} items")
     return True
 
@@ -82,10 +88,12 @@ def test_optim_step(training_client, learning_rate: float = 1e-4):
         weight_decay=0.01,
     )
 
+    start_time = time.time()
     optim_future = training_client.optim_step(adam_params)
     result = optim_future.result()
+    elapsed = time.time() - start_time
 
-    print(f"Optim step completed")
+    print(f"Optim step completed in {elapsed:.2f}s (client e2e)")
     print(f"Result: {result}")
     return True
 

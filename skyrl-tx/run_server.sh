@@ -20,7 +20,7 @@ DUMP_XLA=${DUMP_XLA:-false}  # Dump XLA graphs to /tmp/xla_dump
 
 # Memory optimization
 LOSS_CHUNK_SIZE=${LOSS_CHUNK_SIZE:-1024}  # Chunk size for cross-entropy loss
-GRADIENT_CHECKPOINTING=${GRADIENT_CHECKPOINTING:-false}  # Recompute activations during backward to save memory
+GRADIENT_CHECKPOINTING=${GRADIENT_CHECKPOINTING:-true}  # Recompute activations during backward to save memory
 
 # Build backend config JSON
 BACKEND_CONFIG=$(cat <<EOF

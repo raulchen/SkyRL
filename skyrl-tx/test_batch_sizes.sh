@@ -1,7 +1,7 @@
 #!/bin/bash
 # Test different batch sizes for sampling/training and report max GPU memory usage
 
-set -e
+set -eo pipefail
 
 # Configuration
 SERVER_SCRIPT="./run_server.sh"
@@ -71,9 +71,9 @@ stop_gpu_monitor() {
 
 get_max_gpu_memory() {
     local monitor_file=$1
-    # Sort by memory (2nd column) descending and show top 30 lines
+    # Sort by memory (2nd column) descending and show top 10 lines
     if [[ -f "$monitor_file" ]]; then
-        sort -t',' -k2 -nr "$monitor_file" | head -30
+        sort -t',' -k2 -nr "$monitor_file" | head -10
     fi
 }
 
@@ -87,6 +87,33 @@ get_peak_memory() {
     fi
 }
 
+get_jit_time() {
+    local server_log=$1
+    # Extract JIT compilation time from server log
+    # Format: "JIT compilation for sample seq_len=4096 took 96.75s"
+    if [[ -f "$server_log" ]]; then
+        grep -oP 'JIT compilation.*took \K[0-9.]+' "$server_log" | tail -1
+    else
+        echo ""
+    fi
+}
+
+get_client_time() {
+    local client_log=$1
+    local mode=$2
+    # Extract client e2e time from client log
+    # Format: "Sampling completed in X.XXs (client e2e)" or "Forward-backward completed in X.XXs (client e2e)"
+    if [[ -f "$client_log" ]]; then
+        if [[ "$mode" == "sample" ]]; then
+            grep -oP 'Sampling completed in \K[0-9.]+' "$client_log" | tail -1
+        else
+            grep -oP 'Forward-backward completed in \K[0-9.]+' "$client_log" | tail -1
+        fi
+    else
+        echo ""
+    fi
+}
+
 run_test() {
     local batch_size=$1
     local mode=$2
@@ -97,7 +124,7 @@ run_test() {
     log_info "=========================================="
 
     # Create temp file for GPU monitoring
-    local gpu_monitor_file=$(mktemp)
+    local gpu_monitor_file="/tmp/gpu_usage_${mode}_${batch_size}.log"
 
     # Kill any existing processes
     kill_existing
@@ -140,8 +167,12 @@ run_test() {
     fi
     SERVER_PID=""
 
-    # Get peak memory
+    # Get peak memory and timing
     local peak_mem=$(get_peak_memory "$gpu_monitor_file")
+    local server_log="/tmp/server_${mode}_${batch_size}.log"
+    local client_log="/tmp/client_${mode}_${batch_size}.log"
+    local jit_time=$(get_jit_time "$server_log")
+    local client_time=$(get_client_time "$client_log" "$mode")
     local status="PASS"
     if [[ $test_result -ne 0 ]]; then
         status="FAIL"
@@ -155,11 +186,13 @@ run_test() {
         log_error "Result: ${RED}FAIL${NC}"
     fi
 
+    log_info "JIT compile time: ${jit_time:-N/A}s"
+    log_info "Client e2e time: ${client_time:-N/A}s"
     log_info "Top GPU memory usage (gpu_idx, memory_mib):"
     get_max_gpu_memory "$gpu_monitor_file"
 
     # Log to results file
-    echo "$mode,$batch_size,$seq_len,$status,$peak_mem" >> "$RESULTS_FILE"
+    echo "$mode,$batch_size,$seq_len,$status,$peak_mem,${jit_time:-},${client_time:-}" >> "$RESULTS_FILE"
 
     # Cleanup temp file
     rm -f "$gpu_monitor_file"
@@ -171,7 +204,7 @@ run_test() {
 main() {
     # Create results file
     RESULTS_FILE="test_results_$(date +%Y%m%d_%H%M%S).csv"
-    echo "mode,batch_size,seq_len,status,peak_gpu_mem_mib" > "$RESULTS_FILE"
+    echo "mode,batch_size,seq_len,status,peak_gpu_mem_mib,jit_time_sec,client_e2e_sec" > "$RESULTS_FILE"
 
     echo "=========================================="
     echo "Batch Size Test Runner"
