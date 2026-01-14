@@ -515,6 +515,7 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
         adapter_indices: jax.Array | None = None,
         kv_cache: KVCache | None = None,
         is_training: bool = False,
+        last_token_logits_only: bool = False,
     ) -> CausalLMOutput:
         if positions is None:
             positions = compute_positions(attention_mask)
@@ -535,8 +536,11 @@ class Qwen3ForCausalLM(nnx.Module, GeneratorMixin):
             # Training: skip logits, return lm_head for chunked computation
             logits = None
         else:
-            # Inference: compute logits normally
+            # Inference: compute logits
             hidden_states = outputs.last_hidden_state
+            # Only compute logits for last token if requested (saves memory during prefill)
+            if last_token_logits_only:
+                hidden_states = hidden_states[:, -1:, :]
             if self.config.tie_word_embeddings:
                 logits = hidden_states @ self.model.embed_tokens.embedding.value.T
             else:
