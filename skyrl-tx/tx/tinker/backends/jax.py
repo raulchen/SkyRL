@@ -249,6 +249,7 @@ class JaxBackendImpl(AbstractBackend):
         loss_chunk_size = self.config.loss_chunk_size
         if loss_chunk_size <= 0:
             raise ValueError(f"loss_chunk_size must be > 0, got {loss_chunk_size}")
+        gradient_checkpointing = self.config.gradient_checkpointing
 
         def loss_for_lora(
             lora_params: nnx.State,
@@ -297,6 +298,9 @@ class JaxBackendImpl(AbstractBackend):
                 log_sum_exp = jax.nn.logsumexp(chunk_logits, axis=-1, keepdims=True)
                 target_logits = jnp.take_along_axis(chunk_logits, chunk_targets[..., None], axis=-1)
                 return (target_logits - log_sum_exp).squeeze(-1)
+
+            if gradient_checkpointing:
+                compute_chunk_logprobs = jax.checkpoint(compute_chunk_logprobs)
 
             # Process chunks sequentially using lax.map (not vmap) to reduce memory
             all_logprobs = jax.lax.map(compute_chunk_logprobs, (chunked_hidden, chunked_targets))
