@@ -28,6 +28,10 @@ class EngineConfig(BaseModel):
         description="Database URL (e.g., postgresql://user:password@localhost:5432/tinker). If not set, uses TX_DATABASE_URL env var or defaults to SQLite",
         json_schema_extra={"argparse_type": str, "env_var": "TX_DATABASE_URL"},
     )
+    database_timeout: int = Field(
+        default=60,
+        description="Database lock timeout in seconds (for SQLite). Increase if experiencing 'database is locked' errors under high concurrency.",
+    )
     external_inference_url: str | None = Field(
         default=None,
         description="URL of the external inference engine. If set, sample requests will be sent to the external engine instead (currently only VLLM is supported).",

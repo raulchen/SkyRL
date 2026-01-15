@@ -184,7 +184,7 @@ class TinkerEngine:
     ):
         """Initialize the engine with a database connection and base model."""
         self.config = config
-        self.db_engine = create_engine(config.database_url, echo=False)
+        self.db_engine = create_engine(config.database_url, echo=False, connect_args={"timeout": config.database_timeout})
 
         # Initialize the backend (handles model state, computation, and adapter management)
         if config.backend not in BACKENDS:

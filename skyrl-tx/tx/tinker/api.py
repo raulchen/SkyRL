@@ -41,7 +41,9 @@ async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown."""
 
     db_url = get_async_database_url(app.state.engine_config.database_url)
-    app.state.db_engine = create_async_engine(db_url, echo=False)
+    app.state.db_engine = create_async_engine(
+        db_url, echo=False, connect_args={"timeout": app.state.engine_config.database_timeout}
+    )
 
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
