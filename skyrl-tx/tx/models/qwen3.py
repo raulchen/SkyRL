@@ -6,8 +6,9 @@ from jax.sharding import get_abstract_mesh
 from tx.layers.lora import LoRAEmbed, LoRAExpert, LoRALinear
 from tx.layers.util import prepare_routing
 from tx.layers.rotary_embedding import apply_rope
-from tx.models.configs import Qwen3Config
 from tx.layers.layernorm import RMSNorm
+from tx.models.attention import dot_product_attention
+from tx.models.configs import Qwen3Config
 from tx.models.types import CausalLMOutput, ModelOutput
 from tx.utils.generator import GeneratorMixin, KVCache, compute_positions
 
@@ -103,15 +104,8 @@ class Qwen3Attention(nnx.Module):
 
         updated_cache = (k, v)
 
-        # Attention (causal only during prefill, GQA handled natively by dot_product_attention)
-        attn_output = jax.nn.dot_product_attention(
-            q,
-            k,
-            v,
-            scale=1.0 / self.head_dim**0.5,
-            mask=attention_mask[:, None, None, :].astype(bool),
-            is_causal=kv_cache is None,
-        )
+        is_causal = kv_cache is None
+        attn_output = dot_product_attention(q, k, v, attention_mask, is_causal, self.head_dim)
 
         output = attn_output.reshape(B, T, self.num_heads * self.head_dim)
         return self.o_proj(output, adapter_indices=adapter_indices), updated_cache
