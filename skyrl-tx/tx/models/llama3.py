@@ -369,6 +369,14 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
         """Return True if a parameter path corresponds to LoRA weights."""
         return any(name in path for name in ("lora_A", "lora_B"))
 
+    @property
+    def lm_head_weight(self) -> jax.Array:
+        """Returns lm_head weight [H, V] for external matmul (e.g., chunked cross-entropy)."""
+        if self.config.tie_word_embeddings:
+            return self.model.embed_tokens.embedding[...].T
+        else:
+            return self.lm_head.kernel[...]
+
     def __call__(
         self,
         input_ids: jax.Array,
@@ -380,6 +388,7 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
         kv_cache: KVCache | None = None,
         last_token_logits_only: bool = False,
         is_training: bool = False,
+        skip_logits: bool = False,
     ) -> CausalLMOutput:
         if positions is None:
             positions = compute_positions(attention_mask)
@@ -393,20 +402,27 @@ class Llama3ForCausalLM(nnx.Module, GeneratorMixin):
             kv_cache=kv_cache,
             is_training=is_training,
         )
-        hidden_states = outputs.last_hidden_state
-        # Only compute logits for last token if requested (saves memory during prefill)
-        if last_token_logits_only:
-            hidden_states = hidden_states[:, -1:, :]
-        if self.config.tie_word_embeddings:
-            logits = hidden_states @ self.model.embed_tokens.embedding.value.T
+
+        if skip_logits:
+            # Skip logits computation for chunked cross-entropy (uses lm_head weight directly)
+            logits = None
         else:
-            logits = self.lm_head(hidden_states, adapter_indices=adapter_indices)
+            # Compute logits with LoRA applied (required for train_unembed=True)
+            hidden_states = outputs.last_hidden_state
+            # Only compute logits for last token if requested (saves memory during prefill)
+            if last_token_logits_only:
+                hidden_states = hidden_states[:, -1:, :]
+            if self.config.tie_word_embeddings:
+                logits = hidden_states @ self.model.embed_tokens.embedding[...].T
+            else:
+                logits = self.lm_head(hidden_states, adapter_indices=adapter_indices)
 
         return CausalLMOutput(
             logits=logits,
             last_hidden_state=outputs.last_hidden_state,
             kv_cache=outputs.kv_cache,
             hidden_states=outputs.hidden_states,
+            lm_head=self.lm_head_weight,
         )
 
 
