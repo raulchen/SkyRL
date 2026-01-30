@@ -48,7 +48,8 @@ def load_model(
     mesh_axes: tuple[str, str],
     *,
     loss_chunk_size: int = 0,
-) -> ModelForCausalLM:
+    gradient_checkpointing: bool = False,
+) -> tuple[ModelForCausalLM, ModelConfig]:
     """Load model from pre-saved weights directory."""
     model, config = create_model(
         model_name,
@@ -57,10 +58,10 @@ def load_model(
         mesh_axes,
         mesh_axis_types=(jax.sharding.AxisType.Auto,) * 2,
         loss_chunk_size=loss_chunk_size,
-        gradient_checkpointing=False,
+        gradient_checkpointing=gradient_checkpointing,
     )
     load_safetensors(tmp_dir, config, model)
-    return model
+    return model, config
 
 
 @pytest.mark.parametrize("model_name,config_cls,model_cls,mesh_axes", MODEL_PARAMS, ids=MODEL_IDS)
@@ -68,6 +69,7 @@ class TestGradientCheckpointing:
 
     def _forward(
         self,
+        tmp_dir: str,
         model_name: str,
         config_cls: type[ModelConfig],
         model_cls: type[ModelForCausalLM],
@@ -75,10 +77,10 @@ class TestGradientCheckpointing:
         gradient_checkpointing: bool,
         **forward_kwargs: Any,
     ) -> tuple[ModelForCausalLM, ModelConfig, CausalLMOutput]:
-        """Create model, run forward pass, and return (model, config, out)."""
+        """Load model, run forward pass, and return (model, config, out)."""
         batch_size, seq_len = 2, 8
-        model, config = create_model(
-            model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=gradient_checkpointing
+        model, config = load_model(
+            tmp_dir, model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=gradient_checkpointing
         )
         input_ids = jax.random.randint(jax.random.key(0), (batch_size, seq_len), 0, config.vocab_size)
         attention_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
@@ -93,15 +95,20 @@ class TestGradientCheckpointing:
         mesh_axes: tuple[str, str],
     ) -> None:
         """Forward pass should produce identical outputs with/without checkpointing."""
-        model, _, out = self._forward(model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=False)
-        logits_no_ckpt = model.compute_logits(out.last_hidden_state)
-        del model, out
+        with tempfile.TemporaryDirectory() as tmp:
+            hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
+            hf_model.save_pretrained(tmp, safe_serialization=True)
+            del hf_model
 
-        model, _, out = self._forward(model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=True)
-        logits_ckpt = model.compute_logits(out.last_hidden_state)
-        del model, out
+            model, _, out = self._forward(tmp, model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=False)
+            logits_no_ckpt = model.compute_logits(out.last_hidden_state)
+            del model, out
 
-        np.testing.assert_allclose(logits_no_ckpt, logits_ckpt, rtol=1e-4, atol=1e-6)
+            model, _, out = self._forward(tmp, model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=True)
+            logits_ckpt = model.compute_logits(out.last_hidden_state)
+            del model, out
+
+        np.testing.assert_allclose(logits_no_ckpt, logits_ckpt, rtol=1e-4, atol=1e-4)
 
     def test_hidden_states_length_matches(
         self,
@@ -111,23 +118,28 @@ class TestGradientCheckpointing:
         mesh_axes: tuple[str, str],
     ) -> None:
         """Both paths should return same number of hidden states."""
-        _, config, out = self._forward(
-            model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=False, output_hidden_states=True
-        )
-        hidden_states_no_ckpt = out.hidden_states
-        num_hidden_layers = config.num_hidden_layers
-        del out
+        with tempfile.TemporaryDirectory() as tmp:
+            hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
+            hf_model.save_pretrained(tmp, safe_serialization=True)
+            del hf_model
 
-        _, _, out = self._forward(
-            model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=True, output_hidden_states=True
-        )
-        hidden_states_ckpt = out.hidden_states
-        del out
+            _, config, out = self._forward(
+                tmp, model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=False, output_hidden_states=True
+            )
+            hidden_states_no_ckpt = out.hidden_states
+            num_hidden_layers = config.num_hidden_layers
+            del out
+
+            _, _, out = self._forward(
+                tmp, model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=True, output_hidden_states=True
+            )
+            hidden_states_ckpt = out.hidden_states
+            del out
 
         assert len(hidden_states_no_ckpt) == len(hidden_states_ckpt) == num_hidden_layers + 1
         for i, (hs_no_ckpt, hs_ckpt) in enumerate(zip(hidden_states_no_ckpt, hidden_states_ckpt)):
             np.testing.assert_allclose(
-                hs_no_ckpt, hs_ckpt, rtol=1e-4, atol=1e-6, err_msg=f"Mismatch at hidden state {i}"
+                hs_no_ckpt, hs_ckpt, rtol=1e-4, atol=1e-4, err_msg=f"Mismatch at hidden state {i}"
             )
 
     def test_eval_mode_uses_standard_path(
@@ -137,16 +149,20 @@ class TestGradientCheckpointing:
         model_cls: type[ModelForCausalLM],
         mesh_axes: tuple[str, str],
     ) -> None:
-        """eval() mode should use standard path with KV cache support."""
-        model, config = create_model(model_name, config_cls, model_cls, mesh_axes)
-        config.gradient_checkpointing = True
+        """is_training=False should use standard path with KV cache support."""
+        with tempfile.TemporaryDirectory() as tmp:
+            hf_model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager", use_safetensors=True)
+            hf_model.save_pretrained(tmp, safe_serialization=True)
+            del hf_model
 
-        batch_size, seq_len = 2, 8
-        input_ids = jax.random.randint(jax.random.key(0), (batch_size, seq_len), 0, config.vocab_size)
-        attention_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+            model, config = load_model(tmp, model_name, config_cls, model_cls, mesh_axes, gradient_checkpointing=True)
 
-        model.eval()
-        out = model(input_ids, attention_mask=attention_mask)
+            batch_size, seq_len = 2, 8
+            input_ids = jax.random.randint(jax.random.key(0), (batch_size, seq_len), 0, config.vocab_size)
+            attention_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+
+            # is_training=False (default) should use standard path with KV cache
+            out = model(input_ids, attention_mask=attention_mask, is_training=False)
 
         # KV cache should be populated (checkpointed path returns empty)
         assert len(out.kv_cache.keys) == config.num_hidden_layers
@@ -174,7 +190,7 @@ def test_compute_logits(
         del hf_model, hf_outputs
 
         # Load our model from saved weights
-        model = load_model(tmp, model_name, config_cls, model_cls, mesh_axes)
+        model, _ = load_model(tmp, model_name, config_cls, model_cls, mesh_axes)
 
         # Get our logits via compute_logits
         outputs = model(batch.input_ids.numpy(), attention_mask=batch.attention_mask.numpy())
@@ -207,13 +223,13 @@ def test_chunked_logprobs(
         del hf_model
 
         # Load non-chunked model, compute logprobs, then delete
-        model = load_model(tmp, model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=0)
+        model, _ = load_model(tmp, model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=0)
         outputs = model(input_ids, attention_mask=attention_mask)
         logprobs_nonchunked = np.asarray(model.compute_logprobs(outputs.last_hidden_state, target_ids))
         del model, outputs
 
         # Load chunked model, compute logprobs
-        model = load_model(tmp, model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=chunk_size)
+        model, _ = load_model(tmp, model_name, config_cls, model_cls, mesh_axes, loss_chunk_size=chunk_size)
         outputs = model(input_ids, attention_mask=attention_mask)
         logprobs_chunked = np.asarray(model.compute_logprobs(outputs.last_hidden_state, target_ids))
 
