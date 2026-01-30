@@ -82,8 +82,7 @@ class TestGradientCheckpointing:
         )
         input_ids = jax.random.randint(jax.random.key(0), (batch_size, seq_len), 0, config.vocab_size)
         attention_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
-        model.train()
-        out = model(input_ids, attention_mask=attention_mask, **forward_kwargs)
+        out = model(input_ids, attention_mask=attention_mask, is_training=True, **forward_kwargs)
         return model, config, out
 
     def test_output_matches_non_checkpointed(
