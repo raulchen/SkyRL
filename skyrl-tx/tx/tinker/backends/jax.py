@@ -730,6 +730,11 @@ class JaxBackendImpl(AbstractBackend):
         # Collect generated sequences and prompt logprobs across batches
         all_sequences: list[types.GeneratedSequence] = []
         all_prompt_logprobs: list[list[float]] = []
+        kv_tokens_allocated = 0
+        kv_tokens_used = 0
+        kv_prompt_lens: list[int] = []
+        kv_gen_lens: list[int] = []
+        kv_sub_batches: list[tuple[int, int, int]] = []  # (max_len, max_new_tokens, kv_max_length)
 
         # Sharding specs for sampling inputs
         sharding_2d = jax.NamedSharding(self.mesh, jax.P("fsdp", None))
@@ -778,6 +783,32 @@ class JaxBackendImpl(AbstractBackend):
                 )
                 if needs_prompt_logprobs and result.prompt_logprobs:
                     all_prompt_logprobs.extend(result.prompt_logprobs[:batch_size])
+
+                # Track KV cache allocation waste
+                batch_max_new_tokens = max(sp.max_tokens for sp in sampling_params)
+                kv_max_length = round_up_seq_len(max_len + batch_max_new_tokens)
+                kv_tokens_allocated += batch_size * kv_max_length
+                kv_sub_batches.append((max_len, batch_max_new_tokens, kv_max_length))
+                for i in range(batch_size):
+                    prompt_len = len(all_prompts[batch_start + i])
+                    gen_len = len(result.generated_ids[i])
+                    kv_prompt_lens.append(prompt_len)
+                    kv_gen_lens.append(gen_len)
+                    kv_tokens_used += prompt_len + gen_len
+
+        if kv_tokens_allocated > 0:
+            n = len(kv_prompt_lens)
+            waste_pct = 100.0 * (1 - kv_tokens_used / kv_tokens_allocated)
+            avg_prompt = sum(kv_prompt_lens) / n
+            avg_gen = sum(kv_gen_lens) / n
+            sub = kv_sub_batches[-1]
+            logger.info(
+                f"sample() KV cache waste: {waste_pct:.1f}% "
+                f"(allocated={kv_tokens_allocated:,}, used={kv_tokens_used:,}, sequences={n}) "
+                f"padded_prompt={sub[0]}, max_new_tokens={sub[1]}, kv_max_length={sub[2]} | "
+                f"prompt_len=[{min(kv_prompt_lens)}..{max(kv_prompt_lens)}, avg={avg_prompt:.0f}], "
+                f"gen_len=[{min(kv_gen_lens)}..{max(kv_gen_lens)}, avg={avg_gen:.0f}]"
+            )
 
         for request_id, _, start_idx, end_idx, prompt_logprobs_requested in request_batch_slices:
             sequences = [all_sequences[i] for i in range(start_idx, end_idx)]
